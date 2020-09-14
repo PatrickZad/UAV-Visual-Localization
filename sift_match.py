@@ -1,6 +1,6 @@
 import cv2 as cv
 import numpy as np
-from .dataset.sensefly import scene_list, SenseflyGeoDataReader
+from data.sensefly import scene_list, SenseflyGeoDataReader
 
 
 def default_corners(img):

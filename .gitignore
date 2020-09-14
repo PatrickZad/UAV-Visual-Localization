@@ -2,3 +2,6 @@
 /.idea
 *.jpg
 *.pyc
+*.pth
+*.tar
+*.pth.tar
