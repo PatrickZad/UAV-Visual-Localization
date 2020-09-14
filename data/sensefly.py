@@ -8,7 +8,7 @@ import re
 import numpy as np
 import cv2 as cv
 
-scene_list = ['airport', 'gravel_pit', 'industrial1', 'industrial2',
+scene_list = ['airport1', 'airport2', 'gravel_pit', 'industrial1', 'industrial2',
               'new_road_corridor', 'technology_park', 'village']
 
 
@@ -29,16 +29,20 @@ class SenseflyGeoDataReader:
         self._map_size = map_size
         self._map_scale_f = map_scale_f
         self._aug_methods = aug_methods
-        self._scene_pairs = []
-
-        for i in range(len(scene_list)):
-            img_files = os.path.join(dataset_dir, self._scene_list[i], 'imgs')
-            mapfiles=os.path.join(dataset_dir, self._scene_list[i], 'imgs')
-            self._scene_pairs += [(img_file, i) for img_file in img_files]
         self._map_geo = pd.read_csv(os.path.join(dataset_dir, 'map_geo.csv'))
 
+        self._scene_pairs = {}
+        self._img_map_pairs = []
+        for i in range(len(self._scene_list)):
+            img_files_dir = os.path.join(self._dir, self._scene_list[i], 'imgs')
+            mapfiles_dir = os.path.join(self._dir, self._scene_list[i], 'maps')
+            self._scene_pairs[self._scene_list[i]] = (mapfiles_dir, img_files_dir)
+        for scene, pair in self._scene_pairs.items():
+            self._img_map_pairs += [(scene, img_fname, map_fname) for img_fname in os.listdir(pair[1])
+                                    for map_fname in os.listdir(pair[0])]
+
     def __len__(self) -> int:
-        return len(self._scene_pairs)
+        return len(self._img_map_pairs)
 
     def _crop_uav_img(self, img):
         h, w = img.shape[:2]
@@ -82,8 +86,20 @@ class SenseflyGeoDataReader:
         return img_r, (left, top, right, bottom)
 
     def __getitem__(self, index: int):
-        uav_img_fname, scene_id = self._scene_pairs[index]
-        uav_pil_img = Image.open(os.path.join(self._dir, self._scene_list[scene_id], uav_img_fname))
+        scene, uav_img_fname, map_fname = self._img_map_pairs[index]
+        uav_img_arr,uav_loc,map_img_arr,map_geo=self._get_pair(scene,os.path.join(self._dir,))
+        if self._uav_crop_size is not None:
+            uav_img_arr = self._crop_uav_img(uav_img_arr)
+        elif self._uav_scale_f is not None:
+            uav_img_arr = cv.resize(uav_img_arr, (0, 0), self._uav_scale_f, self._uav_scale_f)
+        if self._map_scale_f is not None:
+            map_img_arr = cv.resize(map_img_arr, (0, 0), self._map_scale_f, self._map_scale_f)
+        elif self._map_size is not None:
+            map_img_arr,map_geo = self._pad_map_img(map_img_arr, map_geo)
+        return uav_img_arr, uav_loc,map_img_arr,map_geo
+
+    def _get_pair(self, scene, map_path, img_path):
+        uav_pil_img = Image.open(img_path)
         exifdata = uav_pil_img.getexif()
         for tag_id in exifdata:
             tag = TAGS.get(tag_id, tag_id)
@@ -95,26 +111,12 @@ class SenseflyGeoDataReader:
                 continue
         uav_img_arr = np.array(uav_pil_img)
         uav_loc = (lon, lat)
-        if self._uav_crop_size is not None:
-            uav_img_arr = self._crop_uav_img(uav_img_arr)
-        elif self._uav_scale_f is not None:
-            uav_img_arr = cv.resize(uav_img_arr, (0, 0), self._uav_scale_f, self._uav_scale_f)
-        map_files = os.listdir(os.path.join(self._dir, self._scene_list[scene_id], 'maps'))
-        map_img_arr_list = [
-            cv.cvtColor(cv.imread(os.path.join(self._dir, self._scene_list[scene_id], 'maps', map_file)),
-                        cv.COLOR_BGR2RGB) for map_file in map_files]
-        map_img_geo = self._map_geo.loc[self._scene_list[scene_id], :4]
-        if self._map_scale_f is not None:
-            map_geo_pair = [(cv.resize(map_img_arr, (0, 0), self._map_scale_f, self._map_scale_f), map_img_geo) for
-                            map_img_arr in map_img_arr_list]
-        elif self._map_size is not None:
-            map_geo_pair = [self._pad_map_img(map_img, map_img_geo) for map_img in map_img_arr_list]
-        else:
-            map_geo_pair = [(map_img, map_img_geo) for map_img in map_img_arr_list]
-        return (uav_img_arr, uav_loc), map_geo_pair
+        map_img_arr = cv.imread(map_path)
+        map_geo = self._map_geo.loc[scene, :4]
+        return uav_img_arr, uav_loc, map_img_arr, map_geo
 
 
-class SenseFlyGeoDataset(Dataset):
+class SenseFlyGeoTrain(Dataset):
     def __init__(self, data_reader: SenseflyGeoDataReader):
         self._data_reader = data_reader
 
@@ -132,25 +134,30 @@ class SenseFlyGeoDataset(Dataset):
         return uav_img_t_norm, uav_loc, map_img_t_norm, map_geo
 
 
-class SenseFlyGeoSceneVal(Dataset):
-    def __init__(self, data_reader: SenseflyGeoDataReader):
-        pass
+class SenseFlyGeoSingleMapVal(Dataset):
+    def __init__(self, scene, map_dir, map_fname, img_dir):
+        self.scene = scene
+        self._map_file_path = os.path.join(map_dir, map_fname)
+        self.map_id = map_fname[:-4]
+        self._img_dir = img_dir
+        self._img_fnames = os.listdir(img_dir)
 
     def __getitem__(self, item):
-
         pass
+
     def __len__(self):
         pass
+
+
 class SenseFlyGeoScenesReader(SenseflyGeoDataReader):
-    def __init__(self,dataset_dir, scene_list=scene_list, uav_crop_size=None, uav_scale_f=None, map_size=None,
+    def __init__(self, dataset_dir, scene_list=scene_list, uav_crop_size=None, uav_scale_f=None, map_size=None,
                  map_scale_f=None, aug_methods=[]):
-        assert uav_crop_size is None or uav_scale_f is None
-        assert map_size is None or map_scale_f is None
-        self._dir = dataset_dir
-        self._scene_list = scene_list
-        self._uav_crop_size = uav_crop_size
-        self._uav_scale_f = uav_scale_f
-        self._map_size = map_size
-        self._map_scale_f = map_scale_f
-        self._aug_methods = aug_methods
-        self._img_pairs = []
+        super(SenseflyGeoDataReader, self).__init__(dataset_dir, scene_list, uav_crop_size, uav_scale_f, map_size,
+                                                    map_scale_f, aug_methods)
+
+    def getValDatasets(self):
+        datasets = []
+        for scene, (map_dir, img_dir) in self._scene_pairs:
+            datasets += [SenseFlyGeoSingleMapVal(scene, map_dir, map_fname, img_dir) for map_fname in
+                         os.listdir(map_dir)]
+        return datasets
