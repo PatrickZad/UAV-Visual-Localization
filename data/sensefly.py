@@ -87,7 +87,7 @@ class SenseflyGeoDataReader:
 
     def __getitem__(self, index: int):
         scene, uav_img_fname, map_fname = self._img_map_pairs[index]
-        uav_img_arr,uav_loc,map_img_arr,map_geo=self._get_pair(scene,os.path.join(self._dir,))
+        uav_img_arr, uav_loc, map_img_arr, map_geo = self._get_pair(scene, os.path.join(self._dir, ))
         if self._uav_crop_size is not None:
             uav_img_arr = self._crop_uav_img(uav_img_arr)
         elif self._uav_scale_f is not None:
@@ -95,25 +95,29 @@ class SenseflyGeoDataReader:
         if self._map_scale_f is not None:
             map_img_arr = cv.resize(map_img_arr, (0, 0), self._map_scale_f, self._map_scale_f)
         elif self._map_size is not None:
-            map_img_arr,map_geo = self._pad_map_img(map_img_arr, map_geo)
-        return uav_img_arr, uav_loc,map_img_arr,map_geo
+            map_img_arr, map_geo = self._pad_map_img(map_img_arr, map_geo)
+        return uav_img_arr, uav_loc, map_img_arr, map_geo
 
     def _get_pair(self, scene, map_path, img_path):
         uav_pil_img = Image.open(img_path)
         exifdata = uav_pil_img.getexif()
         for tag_id in exifdata:
             tag = TAGS.get(tag_id, tag_id)
-            if re.match(r'.*GPS.*Latitude.*', tag):
-                lat = exifdata.get(tag_id)
-                continue
-            if re.match(r'.*GPS.*Longitude.*', tag):
-                lon = exifdata.get(tag_id)
-                continue
+            if re.match(r'.*GPS.*', str(tag)):
+                info = exifdata.get(tag_id)
+                lat = info[2]
+                lon = info[4]
+                break
         uav_img_arr = np.array(uav_pil_img)
         uav_loc = (lon, lat)
         map_img_arr = cv.imread(map_path)
         map_geo = self._map_geo.loc[scene, :4]
         return uav_img_arr, uav_loc, map_img_arr, map_geo
+
+
+def rgb_arr2norm_t(img_arr):
+    img_t = torch.Tensor(np.transpose(img_arr, (2, 0, 1)))
+    return (img_t - 128) / 128
 
 
 class SenseFlyGeoTrain(Dataset):
@@ -124,40 +128,17 @@ class SenseFlyGeoTrain(Dataset):
         return len(self._data_reader)
 
     def __getitem__(self, item):
-        (uav_img, uav_loc), map_geo_pairs = self._data_reader[item]
-        uav_img_t = torch.Tensor(np.transpose(uav_img, (2, 0, 1)))
-        rand_map_id = np.random.randint(len(map_geo_pairs))
-        map_img, map_geo = map_geo_pairs[rand_map_id]
-        map_t = torch.Tensor(np.transpose(map_img, (2, 1, 0)))
-        uav_img_t_norm = (uav_img_t - 128) / 128
-        map_img_t_norm = (map_t - 128) / 128
-        return uav_img_t_norm, uav_loc, map_img_t_norm, map_geo
+        uav_img_arr, uav_loc, map_img_arr, map_geo = self._data_reader[item]
+        uav_img_t = rgb_arr2norm_t(uav_img_arr)
+        map_img_t = rgb_arr2norm_t(map_img_arr)
+        return uav_img_t, map_img_t
 
 
-class SenseFlyGeoSingleMapVal(Dataset):
-    def __init__(self, scene, map_dir, map_fname, img_dir):
-        self.scene = scene
-        self._map_file_path = os.path.join(map_dir, map_fname)
-        self.map_id = map_fname[:-4]
-        self._img_dir = img_dir
-        self._img_fnames = os.listdir(img_dir)
+class SenseFlyGeoVal(SenseFlyGeoTrain):
+    def __init__(self, data_reader: SenseflyGeoDataReader):
+        super(SenseFlyGeoTrain, self).__init__(data_reader)
 
     def __getitem__(self, item):
-        pass
-
-    def __len__(self):
-        pass
-
-
-class SenseFlyGeoScenesReader(SenseflyGeoDataReader):
-    def __init__(self, dataset_dir, scene_list=scene_list, uav_crop_size=None, uav_scale_f=None, map_size=None,
-                 map_scale_f=None, aug_methods=[]):
-        super(SenseflyGeoDataReader, self).__init__(dataset_dir, scene_list, uav_crop_size, uav_scale_f, map_size,
-                                                    map_scale_f, aug_methods)
-
-    def getValDatasets(self):
-        datasets = []
-        for scene, (map_dir, img_dir) in self._scene_pairs:
-            datasets += [SenseFlyGeoSingleMapVal(scene, map_dir, map_fname, img_dir) for map_fname in
-                         os.listdir(map_dir)]
-        return datasets
+        scene, uav_img_fname, map_fname = self._img_map_pairs[item]
+        uav_img_arr, uav_loc, map_img_arr, map_geo = self._data_reader[item]
+        return (scene, uav_img_fname, map_fname), (uav_img_arr, uav_loc, map_img_arr, map_geo)
