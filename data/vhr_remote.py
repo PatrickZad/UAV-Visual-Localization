@@ -9,10 +9,9 @@ from data.augmentation import *
 import math
 
 aug_methods = ['scale', 'rotate', 'tilt', 'erase']
-aug_light = {'scale': 1.5, 'rotate': 60}
-aug_mid = {'scale': 2, 'rotate': 100, 'erase': (0.5, 0.01, 0.02, 0.6)}
-aug_heavy = {'scale': 3, 'rotate': 120, 'erase': (0.7, 0.02, 0.05, 0.3), 'tilt': 0.1}
-
+aug_light = {'scale': (1,1.5), 'rotate': (0,60)}
+aug_mid = {'scale': (1,2), 'rotate': (0,100), 'erase': (0.5, 0.01, 0.02, 0.6)}
+aug_heavy = {'scale': (1,3), 'rotate': (0,120), 'erase': (0.7, 0.02, 0.05, 0.3), 'tilt': 0.1}
 
 class VHRRemoteDataReader:
     def __init__(self, dir, files, aug_options):
@@ -360,7 +359,7 @@ class VHRRemoteWarm(VHRRemoteDataset):
         return ref_t, tar_t
 
 
-def getVHRRemoteDataAugCropper(crop_size=288, map_size=1024, proportion=(0.8, 0.8, 0.2), aug=aug_light, pertube=64):
+def getVHRRemoteDataAugCropper(crop_size=400, map_size=1424, proportion=(0.5, 0.5, 0.5), aug=aug_light, pertube=64):
     # TODO rand val
     # warm,train,val
     dir = os.path.join(dataset_common_dir, 'VHR Remote Sensing')

@@ -5,9 +5,11 @@ from affinity.model import track_match_comb as Model
 from affinity.libs.test_utils import *
 import argparse
 import torch.nn as nn
+import torch
 import os
 from common import loc_dist
 from math import ceil
+from shapely.geometry import Polygon, MultiPoint
 
 
 def parse_args():
@@ -49,40 +51,6 @@ def parse_args():
     return args
 
 
-def transform_space(img, scale_n=6, rot_n=18):
-    # cv.imwrite('./org.jpg', cv.cvtColor(img, cv.COLOR_RGB2BGR))
-
-    img_space = []
-    rot_degs = range(360 // rot_n, 360, 360 // rot_n)
-    img_h, img_w = img.shape[:2]
-    center = ((img_w - 1) / 2, (img_h - 1) / 2)
-    if img_h < img_w:
-        width = img_h // 8 * 8
-        start = int(center[0] - width / 2)
-        img_space.append((0, 0, img[:, start:start + img_h, :].copy()))
-    else:
-        width = img_w // 8 * 8
-        start = int(center[1] - width / 2)
-        img_space.append((0, 0, img[start:start + img_w, :, :].copy()))
-    for i in range(1, scale_n):
-        scaled_img = cv.resize(img, dsize=(0, 0), fx=1 / 2 ** (0.5 * i), fy=1 / 2 ** (0.5 * i))
-        for deg in rot_degs:
-            rot_img, corners = aug.adaptive_rot(scaled_img, rot=deg)
-            '''
-            h, w = rot_img.shape[:2]
-            corners[:, 0][corners[:, 0] < 0] = 0
-            corners[:, 1][corners[:, 1] < 0] = 0
-            corners[:, 0][corners[:, 0] > (w - 1)] = w - 1
-            corners[:, 1][corners[:, 1] > (h - 1)] = h - 1'''
-
-            # cv.imwrite('./rot_scale.jpg', cv.cvtColor(rot_img, cv.COLOR_RGB2BGR))
-            img_crop = center_square_crop(rot_img, corners, str(i) + '_' + str(deg))
-
-            # cv.imwrite('./' + str(i) + '_' + str(deg) + 'crop.jpg', cv.cvtColor(img_crop, cv.COLOR_RGB2BGR))
-            img_space.append((i, deg, img_crop))
-    return img_space
-
-
 def draw_pt(img, pts, color=(0, 0, 255)):
     for pt in pts:
         h, w = img.shape[:2]
@@ -91,80 +59,6 @@ def draw_pt(img, pts, color=(0, 0, 255)):
         top = ceil(max(0, pt[1] - 5))
         bottom = int(min(h, pt[1] + 5))
         img[top:bottom, left:right, :] = color
-
-
-def center_square_crop(img, corners, prefix=''):
-    '''corners[:, 0][corners[:, 0] < 0] = 0
-    corners[:, 1][corners[:, 1] < 0] = 0
-    corners = np.int32(corners)'''
-    left = corners[corners[:, 0] == corners[:, 0].min()].squeeze()
-    right = corners[corners[:, 0] == corners[:, 0].max()].squeeze()
-    top = corners[corners[:, 1] == corners[:, 1].min()].squeeze()
-    bottom = corners[corners[:, 1] == corners[:, 1].max()].squeeze()
-
-    # lr_line = line(left, right)
-    # tb_line = line(top, bottom)
-    center = (img.shape[1] / 2, img.shape[0] / 2)
-    # center = cross_pt(lr_line, tb_line)
-    center_positive = (1, center[1] - center[0])
-    center_negative = (-1, center[1] + center[0])
-
-    cp_cross_pts = valid_cross_pts(left, top, right, bottom, center_positive)
-    cn_cross_pts = valid_cross_pts(left, top, right, bottom, center_negative)
-
-    '''img_vis = img.copy()
-    img_vis = cv.cvtColor(img_vis, cv.COLOR_RGB2BGR)
-    draw_pt(img_vis, cp_cross_pts)
-    draw_pt(img_vis, cn_cross_pts)
-    draw_pt(img_vis, [left, top, right, bottom], (0, 255, 0))
-    cv.imwrite('./' + prefix + 'cross.jpg', img_vis)'''
-
-    cp_dist = dist(*cp_cross_pts)
-    cn_dist = dist(*cn_cross_pts)
-
-    cross_pts = cp_cross_pts if cp_dist < cn_dist else cn_cross_pts
-
-    cross_pts_arr = np.array(cross_pts)
-    width = int((cross_pts_arr[:, 0].max() - cross_pts_arr[:, 0].min() + 1) // 8 * 8)
-    start = (int(center[0] - width / 2), int(center[1] - width / 2))
-    return img[start[1]:start[1] + width, start[0]:start[0] + width, :].copy()
-
-
-def dist(pt1, pt2):
-    return ((pt2[0] - pt1[0]) ** 2 + (pt2[1] - pt1[1]) ** 2) ** 0.5
-
-
-def valid_cross_pts(left, top, right, bottom, test_line):
-    lt_line = line(left, top)
-    rt_line = line(right, top)
-    lb_line = line(left, bottom)
-    rb_line = line(right, bottom)
-
-    pts = []
-
-    lt_cross_pt = cross_pt(lt_line, test_line)
-    if lt_cross_pt[0] < left[0] or lt_cross_pt[0] > right[0] \
-            or lt_cross_pt[1] > bottom[1] or lt_cross_pt[1] < top[1]:
-        pts.append(cross_pt(lb_line, test_line))
-        pts.append(cross_pt(rt_line, test_line))
-    else:
-        pts.append(lt_cross_pt)
-        pts.append(cross_pt(rb_line, test_line))
-    return pts
-
-
-def cross_pt(line1, line2):
-    k1, b1 = line1
-    k2, b2 = line2
-    if k1 == k2:
-        return None
-    x = (b2 - b1) / (k1 - k2)
-    return x, x * k1 + b1
-
-
-def line(pt1, pt2):
-    k = (pt2[1] - pt1[1]) / (pt2[0] - pt1[0])
-    return k, pt1[1] - k * pt1[0]
 
 
 def draw_bbox(img, bbox):
@@ -224,44 +118,117 @@ def coord_in_map(loc_gps, map_geo, map_size):
     lat_per_px = (top - bottom) / h
     return (lon - left) / lon_per_px, (top - lat) / lat_per_px
 
+def save_vis(id, pred2, gt2, frame1, frame2, savedir, coords=None, gt_corners=None, new_c=None):
+    """
+    INPUTS:
+     - pred: predicted patch, a 3xpatch_sizexpatch_size tensor
+     - gt2: GT patch, a 3xhxw tensor
+     - gt1: first GT frame, a 3xhxw tensor
+     - gt_grey: whether to use ground trught L channel in predicted image
+    """
+    if not os.path.exists(savedir):
+        os.makedirs(savedir)
 
-def save_vis(frame1, loc, frame2, geo, coords, bbox):
-    frame1 = cv.cvtColor(frame1, cv.COLOR_RGB2BGR)
-    frame2 = cv.cvtColor(frame2, cv.COLOR_RGB2BGR)
+    b = pred2.size(0)
+    pred2 = pred2 * 128 + 128
+    gt2 = gt2 * 128 + 128
+    frame1 = frame1 * 128 + 128
+    frame2 = frame2 * 128 + 128
 
-    bbox = bbox.squeeze().cpu().detach().numpy()
-    frame2 = draw_bbox(frame2, bbox)
-    coords = coords.squeeze().cpu().detach().numpy()
-    frame1_f_size = frame1.shape[0] // 8
-    frame1_f_grid_x = np.arange(0, frame1_f_size).reshape((1, -1))
-    frame1_f_grid_y = frame1_f_grid_x.reshape((-1, 1))
-    frame1_f_grid_x = np.repeat(frame1_f_grid_x, frame1_f_size, axis=0)
-    frame1_f_grid_y = np.repeat(frame1_f_grid_y, frame1_f_size, axis=1)
-    frame1_f_grid_x = np.expand_dims(frame1_f_grid_x, axis=-1)
-    frame1_f_grid_y = np.expand_dims(frame1_f_grid_y, axis=-1)
-    frame1_f_grid = np.concatenate([frame1_f_grid_x, frame1_f_grid_y], axis=-1)
-    frame1_f_grid_flat = frame1_f_grid.reshape((-1, 2))
-    dsamp_mask = np.zeros(frame1_f_grid_x.shape[:2]) != 0
-    dsamp_mask[::4, ::4] = True
-    dsamp_mask_flat = dsamp_mask.reshape((-1,))
-    frame1_f_coords = frame1_f_grid_flat[dsamp_mask_flat]
-    estimate_coords = coords[dsamp_mask_flat]
+    for cnt in range(b):
+        im = pred2[cnt].cpu().detach().numpy().transpose(1, 2, 0)
+        im_bgr = cv2.cvtColor(np.array(im, dtype=np.uint8), cv2.COLOR_LAB2BGR)
+        im_pred = np.clip(im_bgr, 0, 255)
 
-    est_center = np.mean(coords, axis=0) * 8
-    map_h, map_w = frame2.shape[:2]
-    left, top, right, bottom = geo
-    est_loc = (left + (right - left) / map_w * est_center[0], top - (top - bottom) / map_h * est_center[1])
-    gt_coord = coord_in_map(loc, geo, (map_w, map_h))
-    est_center = np.int32(est_center)
-    gt_coord = np.array(gt_coord, dtype=np.int32)
-    frame2[gt_coord[1] - 5:gt_coord[1] + 5, gt_coord[0] - 5:gt_coord[0] + 5, :] = (0, 255, 0)
-    frame2[est_center[1] - 5:est_center[1] + 5, est_center[0] - 5:est_center[0] + 5, :] = (0, 0, 255)
-    match_img = draw_matches(frame1, frame2, frame1_f_coords, estimate_coords, upsamp_factor=8)
-    err = loc_dist(est_loc, loc)
-    return err, match_img
+        im = gt2[cnt].cpu().detach().numpy().transpose(1, 2, 0)
+        im_gt2 = cv2.cvtColor(np.array(im, dtype=np.uint8), cv2.COLOR_LAB2BGR)
 
+        im = frame1[cnt].cpu().detach().numpy().transpose(1, 2, 0)
+        im_frame1 = cv2.cvtColor(np.array(im, dtype=np.uint8), cv2.COLOR_LAB2BGR)
 
-def transform_search_match(args):
+        im = frame2[cnt].cpu().detach().numpy().transpose(1, 2, 0)
+        im_frame2 = cv2.cvtColor(np.array(im, dtype=np.uint8), cv2.COLOR_LAB2BGR)
+
+        if new_c is not None:
+            new_bbox = new_c[cnt]
+            im_frame2 = draw_bbox(im_frame2, new_bbox)
+            corners = gt_corners[cnt].cpu().detach().numpy()
+            coord_img = coords[cnt].cpu().detach().numpy()
+            frame1_f_size = frame1.size(-1) // 8
+            frame1_f_grid_x = np.arange(0, frame1_f_size).reshape((1, -1))
+            frame1_f_grid_y = frame1_f_grid_x.reshape((-1, 1))
+            frame1_f_grid_x = np.repeat(frame1_f_grid_x, frame1_f_size, axis=0)
+            frame1_f_grid_y = np.repeat(frame1_f_grid_y, frame1_f_size, axis=1)
+            frame1_f_grid_x = np.expand_dims(frame1_f_grid_x, axis=-1)
+            frame1_f_grid_y = np.expand_dims(frame1_f_grid_y, axis=-1)
+            frame1_f_grid = np.concatenate([frame1_f_grid_x, frame1_f_grid_y], axis=-1)
+            frame1_f_grid_flat = frame1_f_grid.reshape((-1, 2))
+            dsamp_mask = np.zeros(frame1_f_grid_x.shape[:2]) != 0
+            dsamp_mask[::4, ::4] = True
+            dsamp_mask_flat = dsamp_mask.reshape((-1,))
+            frame1_f_coords = frame1_f_grid_flat[dsamp_mask_flat]
+            estimate_coords = coord_img[dsamp_mask_flat]
+
+            est_center = np.mean(coords, axis=0) * 8
+            cv2.polylines(im_frame2, np.expand_dims(corners.astype(np.int32), axis=0), 1, (0, 0, 255), 3)
+
+            match_img = draw_matches(im_frame1, im_frame2, frame1_f_coords, estimate_coords, upsamp_factor=8)
+
+            cv2.imwrite(os.path.join(savedir, str(id) + "_{:02d}_loc.png".format(cnt)), match_img)
+
+def line_batch(bpt1,bpt2):
+    bk = (bpt2[:,1] - pt1[:,1]) / (pt2[:,0] - pt1[:,0])
+    return k, pt1[1] - k * pt1[0]
+def avg_px_dist_of_batch(bbox,corners_gt):
+    b_size=bbox.size(0)
+    bbox_lt=torch.cat([bbox[:,:1],bbox[:,1:2]],dim=-1).unsqueeze(1)
+    bbox_rb=torch.cat([bbox[:,2:3],bbox[:,3:]],dim=-1).unsqueeze(1)
+    bbox_center=torch.cat([bbox_lt,bbox_rb],dim=1).mean(1)
+    
+    
+class AverageMeter(object):
+    """Computes and stores the average and current value"""
+
+    def __init__(self):
+        self.reset()
+
+    def reset(self):
+        self.val = 0
+        self.avg = 0
+        self.sum = 0
+        self.count = 0
+
+    def update(self, val, n=1):
+        self.val = val
+        self.sum += val * n
+        self.count += n
+        self.avg = self.sum / self.count
+
+def avg_iou_of_batch(bbox, corners_gt):
+    # left,top,right,bottom
+    batch_size = bbox.size(0)
+    bbox_np = bbox.cpu().detach().numpy()
+    corners_gt_np = corners_gt.cpu().detach().numpy()
+    corners_est_np = np.concatenate([np.expand_dims(np.concatenate([bbox_np[:, :1], bbox_np[:, 1:2]], axis=-1), axis=1),
+                                     np.expand_dims(np.concatenate([bbox_np[:, 2:3], bbox_np[:, 1:2]], axis=-1),
+                                                    axis=1),
+                                     np.expand_dims(np.concatenate([bbox_np[:, 2:3], bbox_np[:, 3:]], axis=-1), axis=1),
+                                     np.expand_dims(np.concatenate([bbox_np[:, :1], bbox_np[:, 3:]], axis=-1),
+                                                    axis=1), ],
+                                    axis=1)
+    iou_sum = 0.
+    for i in range(batch_size):
+        poly_box = Polygon(corners_est_np[i]).convex_hull
+        poly_gt = Polygon(corners_gt_np[i])
+        poly_union = MultiPoint(np.concatenate([corners_est_np[i], corners_gt_np[i]])).convex_hull
+        if not poly_box.intersects(poly_gt):
+            continue
+        inter_area = poly_box.intersection(poly_gt).area
+        union_area = poly_union.area
+        iou_sum += float(inter_area) / union_area
+    return iou_sum / batch_size
+
+def invariant_test_match(args):
     model = Model(args.pretrainRes, args.encoder_dir, args.decoder_dir, temp=args.temp, Resnet=args.Resnet,
                   color_switch=False, coord_switch=False, model_scale=args.estimate_scale)
     model = nn.DataParallel(model)
