@@ -9,9 +9,10 @@ from data.augmentation import *
 import math
 
 aug_methods = ['scale', 'rotate', 'tilt', 'erase']
-aug_light = {'scale': (1,1.5), 'rotate': (0,60)}
-aug_mid = {'scale': (1,2), 'rotate': (0,100), 'erase': (0.5, 0.01, 0.02, 0.6)}
-aug_heavy = {'scale': (1,3), 'rotate': (0,120), 'erase': (0.7, 0.02, 0.05, 0.3), 'tilt': 0.1}
+aug_light = {'scale': (1, 1.5), 'rotate': (0, 60)}
+aug_mid = {'scale': (1, 2), 'rotate': (0, 100), 'erase': (0.5, 0.01, 0.02, 0.6)}
+aug_heavy = {'scale': (1, 3), 'rotate': (0, 120), 'erase': (0.7, 0.02, 0.05, 0.3), 'tilt': 0.1}
+
 
 class VHRRemoteDataReader:
     def __init__(self, dir, files, aug_options):
@@ -201,7 +202,10 @@ class VHRRemoteDataReader:
         origin_img = self._read_rgb(idx)
         map_arr, _ = self._resize_keep_ratio(origin_img, map_size)
         if 'scale' in aug_options.keys():
-            scale_factor = rand(1, aug_options['scale'])
+            if len(aug_options['scale']) == 1:
+                scale_factor = aug_options['scale'][0]
+            else:
+                scale_factor = rand(aug_options['scale'][0], aug_options['scale'][1])
             scaled_img = cv.resize(map_arr, dsize=(0, 0), fx=scale_factor, fy=scale_factor)
             crop, crop_corners = self._rand_crop(scaled_img, crop_size)
             crop_corners = crop_corners / scale_factor
@@ -209,7 +213,10 @@ class VHRRemoteDataReader:
         else:
             crop, crop_corners = self._rand_crop(map_arr, crop_size)
         if 'rotate' in aug_options.keys():
-            rot = rand(-1, 1) * aug_options['rotate']
+            if len(aug_options['rotate']) == 1:
+                rot = aug_options['scale'][0]
+            else:
+                rot = rand(aug_options['rotate'][0], aug_options['rotate'][1])
             if rot < 0:
                 rot += 360
             map_arr, corners, crop_corners = adaptive_rot(map_arr, trans_pts=crop_corners, random=False,
@@ -346,7 +353,7 @@ class VHRRemoteVal(VHRRemoteDataset):
         for t, m, s in zip(crop_t, [128, 128, 128], [128, 128, 128]):
             t.sub_(m).div_(s)'''
         crop_t, map_t, crop_rgb, map_arr_rgb = super(VHRRemoteVal, self).__getitem__(item, True)
-        return 'vhr', crop_t, 'crop' + str(crop_rgb.shape[0]), map_t, self._data_reader.img_name(item), (
+        return crop_t, 'crop' + str(crop_rgb.shape[0]), map_t, self._data_reader.img_name(item), (
             crop_rgb, map_arr_rgb)
 
 
@@ -359,10 +366,10 @@ class VHRRemoteWarm(VHRRemoteDataset):
         return ref_t, tar_t
 
 
-def getVHRRemoteDataAugCropper(crop_size=400, map_size=1424, proportion=(0.5, 0.5, 0.5), aug=aug_light, pertube=64):
+def getVHRRemoteDataAugCropper(dir='../Datasets/VHR Remote Sensing', crop_size=400, map_size=1424,
+                               proportion=(0.5, 0.5, 0.5), aug=aug_light, pertube=64):
     # TODO rand val
     # warm,train,val
-    dir = os.path.join(dataset_common_dir, 'VHR Remote Sensing')
     dir_files = os.listdir(dir)
     length = len(dir_files)
     len1 = int(length * proportion[0])

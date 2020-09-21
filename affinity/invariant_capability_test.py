@@ -1,5 +1,3 @@
-import data.sensefly as sf
-import data.augmentation as aug
 import cv2 as cv
 from affinity.model import track_match_comb as Model
 from affinity.libs.test_utils import *
@@ -7,9 +5,11 @@ import argparse
 import torch.nn as nn
 import torch
 import os
-from common import loc_dist
 from math import ceil
 from shapely.geometry import Polygon, MultiPoint
+import data.vhr_remote as vhr
+from torch.utils.data import DataLoader
+import logging
 
 
 def parse_args():
@@ -32,8 +32,8 @@ def parse_args():
     parser.add_argument("--batchsize", type=int, default=1, help="batchsize")
     parser.add_argument('--workers', type=int, default=16)
 
-    parser.add_argument("--patch_size", type=int, default=256, help="crop size for localization.")
-    parser.add_argument("--full_size", type=int, default=1024, help="full size for one frame.")
+    parser.add_argument("--patch_size", type=int, default=384, help="crop size for localization.")
+    parser.add_argument("--full_size", type=int, default=1424, help="full size for one frame.")
     parser.add_argument("--window_len", type=int, default=2, help='number of images (2 for pair and 3 for triple)')
     parser.add_argument("--device", type=int, default=0,
                         help="0~device_count-1 for single GPU, device_count for dataparallel.")
@@ -118,7 +118,8 @@ def coord_in_map(loc_gps, map_geo, map_size):
     lat_per_px = (top - bottom) / h
     return (lon - left) / lon_per_px, (top - lat) / lat_per_px
 
-def save_vis(id, pred2, gt2, frame1, frame2, savedir, coords=None, gt_corners=None, new_c=None):
+
+def save_vis(id, frame1, frame2, savedir, coords=None, gt_corners=None, bbox_b=None):
     """
     INPUTS:
      - pred: predicted patch, a 3xpatch_sizexpatch_size tensor
@@ -129,19 +130,11 @@ def save_vis(id, pred2, gt2, frame1, frame2, savedir, coords=None, gt_corners=No
     if not os.path.exists(savedir):
         os.makedirs(savedir)
 
-    b = pred2.size(0)
-    pred2 = pred2 * 128 + 128
-    gt2 = gt2 * 128 + 128
+    b = frame1.size(0)
     frame1 = frame1 * 128 + 128
     frame2 = frame2 * 128 + 128
 
     for cnt in range(b):
-        im = pred2[cnt].cpu().detach().numpy().transpose(1, 2, 0)
-        im_bgr = cv2.cvtColor(np.array(im, dtype=np.uint8), cv2.COLOR_LAB2BGR)
-        im_pred = np.clip(im_bgr, 0, 255)
-
-        im = gt2[cnt].cpu().detach().numpy().transpose(1, 2, 0)
-        im_gt2 = cv2.cvtColor(np.array(im, dtype=np.uint8), cv2.COLOR_LAB2BGR)
 
         im = frame1[cnt].cpu().detach().numpy().transpose(1, 2, 0)
         im_frame1 = cv2.cvtColor(np.array(im, dtype=np.uint8), cv2.COLOR_LAB2BGR)
@@ -149,8 +142,8 @@ def save_vis(id, pred2, gt2, frame1, frame2, savedir, coords=None, gt_corners=No
         im = frame2[cnt].cpu().detach().numpy().transpose(1, 2, 0)
         im_frame2 = cv2.cvtColor(np.array(im, dtype=np.uint8), cv2.COLOR_LAB2BGR)
 
-        if new_c is not None:
-            new_bbox = new_c[cnt]
+        if bbox_b is not None:
+            new_bbox = bbox_b[cnt]
             im_frame2 = draw_bbox(im_frame2, new_bbox)
             corners = gt_corners[cnt].cpu().detach().numpy()
             coord_img = coords[cnt].cpu().detach().numpy()
@@ -169,23 +162,37 @@ def save_vis(id, pred2, gt2, frame1, frame2, savedir, coords=None, gt_corners=No
             frame1_f_coords = frame1_f_grid_flat[dsamp_mask_flat]
             estimate_coords = coord_img[dsamp_mask_flat]
 
-            est_center = np.mean(coords, axis=0) * 8
             cv2.polylines(im_frame2, np.expand_dims(corners.astype(np.int32), axis=0), 1, (0, 0, 255), 3)
 
             match_img = draw_matches(im_frame1, im_frame2, frame1_f_coords, estimate_coords, upsamp_factor=8)
 
-            cv2.imwrite(os.path.join(savedir, str(id) + "_{:02d}_loc.png".format(cnt)), match_img)
+            cv2.imwrite(os.path.join(savedir, str(id) + "_{:02d}_match.png".format(cnt)), match_img)
 
-def line_batch(bpt1,bpt2):
-    bk = (bpt2[:,1] - pt1[:,1]) / (pt2[:,0] - pt1[:,0])
-    return k, pt1[1] - k * pt1[0]
-def avg_px_dist_of_batch(bbox,corners_gt):
-    b_size=bbox.size(0)
-    bbox_lt=torch.cat([bbox[:,:1],bbox[:,1:2]],dim=-1).unsqueeze(1)
-    bbox_rb=torch.cat([bbox[:,2:3],bbox[:,3:]],dim=-1).unsqueeze(1)
-    bbox_center=torch.cat([bbox_lt,bbox_rb],dim=1).mean(1)
-    
-    
+
+def line_batch(bpt1, bpt2):
+    bk = (bpt2[:, 1] - bpt1[:, 1]) / (bpt2[:, 0] - bpt1[:, 0])
+    return bk, bpt1[1] - bk * bpt1[0]
+
+
+def cross_pt_batch(bline1, bline2):
+    k1, b1 = bline1
+    k2, b2 = bline2
+    x = (b2 - b1) / (k1 - k2)
+    return x, x * k1 + b1
+
+
+def avg_px_dist_of_batch(bbox, corners_gt):
+    bbox_lt = torch.cat([bbox[:, :1], bbox[:, 1:2]], dim=-1).unsqueeze(1)
+    bbox_rb = torch.cat([bbox[:, 2:3], bbox[:, 3:]], dim=-1).unsqueeze(1)
+    bbox_centers = torch.cat([bbox_lt, bbox_rb], dim=1).mean(1)
+    bline1 = line_batch(corners_gt[:, 0, :], corners_gt[:, 2, :])
+    bline2 = line_batch(corners_gt[:, 1, :], corners_gt[:, 3, :])
+    est_pts = cross_pt_batch(bline1, bline2)
+    square = (est_pts - bbox_centers) ** 2
+    dist_t = (torch.sum(square, dim=-1) ** 0.5).mean()
+    return dist_t.cpu().numpy()[0]
+
+
 class AverageMeter(object):
     """Computes and stores the average and current value"""
 
@@ -203,6 +210,7 @@ class AverageMeter(object):
         self.sum += val * n
         self.count += n
         self.avg = self.sum / self.count
+
 
 def avg_iou_of_batch(bbox, corners_gt):
     # left,top,right,bottom
@@ -228,6 +236,7 @@ def avg_iou_of_batch(bbox, corners_gt):
         iou_sum += float(inter_area) / union_area
     return iou_sum / batch_size
 
+
 def invariant_test_match(args):
     model = Model(args.pretrainRes, args.encoder_dir, args.decoder_dir, temp=args.temp, Resnet=args.Resnet,
                   color_switch=False, coord_switch=False, model_scale=args.estimate_scale)
@@ -238,40 +247,50 @@ def invariant_test_match(args):
     model.cuda()
     model.eval()
 
-    data_reader = sf.SenseflyGeoDataReader('../Datasets/SenseFlyGeo', sf.scene_list, uav_scale_f=0.25, map_scale_f=0.25)
-    for (scene, uav_img_fname, map_fname), (uav_img_arr, uav_loc, map_img_arr, map_geo) in data_reader:
-
-        # cv.imwrite('./uav.jpg', cv.cvtColor(uav_img_arr, cv.COLOR_RGB2BGR))
-        # cv.imwrite('./map.jpg', cv.cvtColor(map_img_arr, cv.COLOR_RGB2BGR))
-
-        expr_dir = os.path.join('./experiments/trans_search', scene, map_fname[:-4])
+    aug_scale = [{"scale": (i / 10,)} for i in range(5, 15)]
+    aug_rot = [{"rotate": (i * 10,)} for i in range(19)]
+    for aug in aug_scale:
+        scale_factor = aug['scale'][0]
+        _, dataset, _ = vhr.getVHRRemoteDataAugCropper(aug=aug)
+        dist_avg_meter = AverageMeter()
+        iou_avg_meter = AverageMeter()
+        dataloader = DataLoader(dataset, batch_size=args.batch_size)
+        expr_dir = os.path.join('./experiments/scale_vhr', str(scale_factor))
         if not os.path.exists(expr_dir):
             os.makedirs(expr_dir)
-        transformed_uav_imgs = transform_space(uav_img_arr)
-        map_lab = cv.cvtColor(map_img_arr, cv.COLOR_RGB2LAB)
-        map_t = sf.LAB_arr2norm_t(map_lab, 'cuda', True)
-        match_dict = {}
-        for s, d, uav_img in transformed_uav_imgs:
-            img_lab = cv.cvtColor(uav_img, cv.COLOR_RGB2LAB)
-            img_t = sf.LAB_arr2norm_t(img_lab, 'cuda', True)
-            img_size = img_t.size(2)
-            p_size = (img_size // 8) - 2
-            model.grid_flat = None
-            bbox, _, coords = model(img_t, map_t, warm_up=False, patch_size=(p_size, p_size), test_result=True)
-            ref_uav_img = uav_img[8:-8, 8:-8, :].copy()
-            err, match_img = save_vis(ref_uav_img, uav_loc, map_img_arr, map_geo, coords, bbox)
-            match_dict[err] = (s, d, match_img)
-        sort_errs = sorted(match_dict.keys())
-        for i in range(5):
-            s, d, match_img = match_dict[sort_errs[i]]
-            err_str = str(sort_errs[i])
-            float_idx = err_str.find('.')
-            err_int = err_str[:float_idx]
-            save_fname = uav_img_fname[:-4] + '_' + err_int + '_' + str(s) + '_' + str(d) + '.jpg'
-            save_path = os.path.join(expr_dir, save_fname)
-            cv.imwrite(save_path, match_img)
 
+        logger = logging.getLogger(__name__)
+        logger.setLevel(logging.DEBUG)
+        fh = logging.FileHandler(os.path.join(expr_dir, 'test.log'))
+        fh.setLevel(logging.DEBUG)
+        ch = logging.StreamHandler()
+        ch.setLevel(logging.DEBUG)
+        formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+        fh.setFormatter(formatter)
+        ch.setFormatter(formatter)
+        logger.addHandler(fh)
+        logger.addHandler(ch)
+
+        for i, frames in enumerate(dataloader):
+            frame1_var = frames[0].cuda()
+            frame2_var = frames[1].cuda()
+            corners_gt = frames[-1]
+            p_size = args.patch_size // 8
+            model.grid_flat = None
+            bbox, _, coords = model(frame1_var, frame2_var, warm_up=False, patch_size=(p_size, p_size),
+                                    test_result=True)
+            save_vis(i, frame1_var, frame2_var, expr_dir, coords, corners_gt, bbox)
+            dist = avg_px_dist_of_batch(bbox, corners_gt)
+            dist_avg_meter.update(dist, args.batch_size)
+            iou = avg_iou_of_batch(bbox, corners_gt)
+            iou_avg_meter.update(iou, args.batch_size)
+            logger.info(str(i) + '-dist-' + str(dist))
+            logger.info(str(i) + '-iou-' + str(iou))
+        logger.info('scale ' + str(scale_factor) + ' avg_dist: ' + str(dist_avg_meter.avg))
+        logger.info('scale ' + str(scale_factor) + ' avg_iou: ' + str(iou_avg_meter.avg))
+    for aug in aug_rot:
+        pass
 
 if __name__ == '__main__':
     args = parse_args()
-    transform_search_match(args)
+    invariant_test_match(args)
