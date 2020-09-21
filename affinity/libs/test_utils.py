@@ -12,7 +12,7 @@ import torch
 # Customized libraries
 import affinity.libs.transforms_pair as transforms
 
-color_palette = np.loadtxt('affinity_t_lib/libs/data/palette.txt', dtype=np.uint8).reshape(-1, 3)
+color_palette = np.loadtxt('affinity/libs/data/palette.txt', dtype=np.uint8).reshape(-1, 3)
 
 
 def transform_topk(aff, frame1, k, h2=None, w2=None):

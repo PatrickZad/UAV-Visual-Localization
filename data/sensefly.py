@@ -7,6 +7,7 @@ from PIL.ExifTags import TAGS
 import re
 import numpy as np
 import cv2 as cv
+from common import decimal_gps
 
 scene_list = ['airport1', 'airport2', 'gravel_pit', 'industrial1', 'industrial2',
               'new_road_corridor', 'technology_park', 'village']
@@ -40,9 +41,20 @@ class SenseflyGeoDataReader:
         for scene, pair in self._scene_pairs.items():
             self._img_map_pairs += [(scene, img_fname, map_fname) for img_fname in os.listdir(pair[1])
                                     for map_fname in os.listdir(pair[0])]
+        self._next = 0
 
     def __len__(self) -> int:
         return len(self._img_map_pairs)
+
+    def __iter__(self):
+        return self
+
+    def __next__(self):
+        if self._next == self.__len__():
+            raise StopIteration
+        result = self.__getitem__(self._next)
+        self._next += 1
+        return result
 
     def _crop_uav_img(self, img):
         h, w = img.shape[:2]
@@ -60,43 +72,50 @@ class SenseflyGeoDataReader:
             crop_img = img_r[offset:offset + self._uav_crop_size[1], :].copy()
         return crop_img
 
-    def _pad_map_img(self, img, loc):
+    def _pad_map_img(self, img, loc, size=None):
+        if size is None:
+            size = self._map_size
         h, w = img.shape[:2]
         left, top, right, bottom = loc
-        h_ratio = self._map_size[1] / h
+        h_ratio = size[1] / h
         w_r = int(w * h_ratio)
-        if w_r < self._map_size[0]:
-            img_r = cv.resize(img, dsize=(w_r, self._uav_crop_size[1]))
-            left_padding = (self._map_size[0] - w_r) // 2
-            right_padding = self._map_size[0] - w_r - left_padding
+        if w_r < size[0]:
+            img_r = cv.resize(img, dsize=(w_r, size[1]))
+            left_padding = (size[0] - w_r) // 2
+            right_padding = size[0] - w_r - left_padding
             left -= (right - left) / w_r * left_padding
             right += (right - left) / w_r * right_padding
-            r_img = np.zeros((self._map_size[0], self._map_size[1], 3), dtype=np.uint8)
+            r_img = np.zeros((size[1], size[0], 3), dtype=np.uint8)
             r_img[:, left_padding:left_padding + w_r, :] = img_r
         else:
-            w_ratio = self._map_size[0] / w
+            w_ratio = size[0] / w
             h_r = int(h * w_ratio)
-            img_r = cv.resize(img, dsize=(h_r, self._uav_crop_size[0]))
-            top_padding = (self._map_size[1] - h_r) // 2
-            bottom_padding = self._map_size[1] - h_r - top_padding
+            img_r = cv.resize(img, dsize=(size[0], h_r))
+            top_padding = (size[1] - h_r) // 2
+            bottom_padding = size[1] - h_r - top_padding
             top += (top - bottom) / h_r * top_padding
             bottom -= (top - bottom) / h_r * bottom_padding
-            r_img = np.zeros((self._map_size[0], self._map_size[1], 3), dtype=np.uint8)
+            r_img = np.zeros((size[1], size[0], 3), dtype=np.uint8)
             r_img[top_padding:top_padding + h_r, :, :] = img_r
-        return img_r, (left, top, right, bottom)
+        return r_img, (left, top, right, bottom)
 
     def __getitem__(self, index: int):
         scene, uav_img_fname, map_fname = self._img_map_pairs[index]
-        uav_img_arr, uav_loc, map_img_arr, map_geo = self._get_pair(scene, os.path.join(self._dir, ))
+        map_path = os.path.join(self._dir, scene, 'maps', map_fname)
+        img_path = os.path.join(self._dir, scene, 'imgs', uav_img_fname)
+        uav_img_arr, uav_loc, map_img_arr, map_geo = self._get_pair(scene, map_path, img_path)
         if self._uav_crop_size is not None:
             uav_img_arr = self._crop_uav_img(uav_img_arr)
         elif self._uav_scale_f is not None:
-            uav_img_arr = cv.resize(uav_img_arr, (0, 0), self._uav_scale_f, self._uav_scale_f)
+            uav_img_arr = cv.resize(uav_img_arr, (0, 0), None, self._uav_scale_f, self._uav_scale_f)
         if self._map_scale_f is not None:
-            map_img_arr = cv.resize(map_img_arr, (0, 0), self._map_scale_f, self._map_scale_f)
+            map_img_arr = cv.resize(map_img_arr, (0, 0), None, self._map_scale_f, self._map_scale_f)
+            h, w = map_img_arr.shape[:2]
+            pad_size = ((w // 8 + 1) * 8, (h // 8 + 1) * 8)
+            map_img_arr, map_geo = self._pad_map_img(map_img_arr, map_geo, pad_size)
         elif self._map_size is not None:
             map_img_arr, map_geo = self._pad_map_img(map_img_arr, map_geo)
-        return uav_img_arr, uav_loc, map_img_arr, map_geo
+        return (scene, uav_img_fname, map_fname), (uav_img_arr, uav_loc, map_img_arr, map_geo)
 
     def _get_pair(self, scene, map_path, img_path):
         uav_pil_img = Image.open(img_path)
@@ -109,14 +128,19 @@ class SenseflyGeoDataReader:
                 lon = info[4]
                 break
         uav_img_arr = np.array(uav_pil_img)
-        uav_loc = (lon, lat)
+        uav_loc = decimal_gps(lon, lat)
         map_img_arr = cv.imread(map_path)
-        map_geo = self._map_geo.loc[scene, :4]
+        map_img_arr = cv.cvtColor(map_img_arr, cv.COLOR_BGR2RGB)
+        map_geo = self._map_geo.loc[scene, ['left', 'top', 'right', 'bottom']].values
         return uav_img_arr, uav_loc, map_img_arr, map_geo
 
 
-def rgb_arr2norm_t(img_arr):
-    img_t = torch.Tensor(np.transpose(img_arr, (2, 0, 1)))
+def LAB_arr2norm_t(img_arr, device='cpu', batch=False):
+    img_t = torch.from_numpy(np.transpose(img_arr, (2, 0, 1)).copy()).contiguous().float()
+    if batch:
+        img_t = torch.unsqueeze(img_t, 0)
+    if device is 'cuda':
+        img_t = img_t.cuda()
     return (img_t - 128) / 128
 
 
@@ -128,9 +152,11 @@ class SenseFlyGeoTrain(Dataset):
         return len(self._data_reader)
 
     def __getitem__(self, item):
-        uav_img_arr, uav_loc, map_img_arr, map_geo = self._data_reader[item]
-        uav_img_t = rgb_arr2norm_t(uav_img_arr)
-        map_img_t = rgb_arr2norm_t(map_img_arr)
+        _, (uav_img_arr, uav_loc, map_img_arr, map_geo) = self._data_reader[item]
+        uav_img_arr = cv.cvtColor(uav_img_arr, cv.COLOR_RGB2LAB)
+        map_img_arr = cv.cvtColor(map_img_arr, cv.COLOR_RGB2LAB)
+        uav_img_t = LAB_arr2norm_t(uav_img_arr)
+        map_img_t = LAB_arr2norm_t(map_img_arr)
         return uav_img_t, map_img_t
 
 
@@ -139,6 +165,10 @@ class SenseFlyGeoVal(SenseFlyGeoTrain):
         super(SenseFlyGeoTrain, self).__init__(data_reader)
 
     def __getitem__(self, item):
-        scene, uav_img_fname, map_fname = self._img_map_pairs[item]
-        uav_img_arr, uav_loc, map_img_arr, map_geo = self._data_reader[item]
-        return (scene, uav_img_fname, map_fname), (uav_img_arr, uav_loc, map_img_arr, map_geo)
+        (scene, uav_img_fname, map_fname), (uav_img_arr, uav_loc,
+                                            map_img_arr, map_geo) = self._data_reader[item]
+        uav_img_arr = cv.cvtColor(uav_img_arr, cv.COLOR_RGB2LAB)
+        map_img_arr = cv.cvtColor(map_img_arr, cv.COLOR_RGB2LAB)
+        uav_img_t = LAB_arr2norm_t(uav_img_arr)
+        map_img_t = LAB_arr2norm_t(map_img_arr)
+        return (scene, uav_img_fname, map_fname), (uav_img_t, uav_loc, map_img_t, map_geo)

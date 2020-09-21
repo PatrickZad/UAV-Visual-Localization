@@ -222,7 +222,7 @@ class track_match_comb(nn.Module):
                 right_bottom[:, 1][right_bottom[:, 1] > limit_h] = limit_h
                 bbox = torch.cat([left_top, right_bottom], dim=-1)'''
             if test_result:
-                return bbox, aff_ref_tar
+                return bbox * 8, aff_ref_tar, coords
 
             Fgray2_crop = diff_crop(Fgray2, bbox[:, 0], bbox[:, 1], bbox[:, 2], bbox[:, 3],
                                     patch_size[1], patch_size[0])

@@ -2,6 +2,7 @@ import numpy as np
 import cv2
 import random
 import math
+from skimage import transform
 
 
 def warp_pts(pts_array, homo_mat):
@@ -29,8 +30,11 @@ def adaptive_rot(img_array, trans_pts=None, random=True, rot=None):
     corners = rot_corners + translation
     mat[0, -1], mat[1, -1] = -x, -y
     rot_img = cv2.warpPerspective(img_array, mat, (w, h))
-    pts = warp_pts(trans_pts, mat)
-    return rot_img, corners,pts
+    if trans_pts is not None:
+        pts = warp_pts(trans_pts, mat)
+        return rot_img, corners, pts
+    else:
+        return rot_img, corners
 
 
 def center_square(img, content_corners):
@@ -82,3 +86,65 @@ def rand_erase(img, probability=0.5, sl=0.02, sh=0.1, r1=0.3, mean=(0.4914, 0.48
             img[x1:x1 + h, y1:y1 + w, 2] = mean[2] * 128
         return img
     return img
+
+
+def adaptive_affine(img, affine_mat, content_corners=None):
+    # 2 by 2 mat
+    # auto translation
+    if content_corners is None:
+        content_corners = default_corners(img)
+    affined_corners = np.int32(np.matmul(content_corners, affine_mat.T))
+    x, y, w, h = cv2.boundingRect(affined_corners)
+    translation = np.array([-x, -y])
+    for corner in affined_corners:
+        corner += translation
+    # return affined and translated corners,adaptive translation affine mat,bounding rectangular width and height
+    affine_mat = np.concatenate([affine_mat, translation.reshape((2, 1))], axis=1)
+    return affined_corners, affine_mat, (w, h)
+
+
+def rotation_phi(img, phi, content_corners=None):
+    if content_corners is None:
+        content_corners = default_corners(img)
+    if phi == 0:
+        return img, np.concatenate([np.eye(2), np.zeros((2, 1))], axis=1), content_corners
+    phi = np.deg2rad(phi)
+    s, c = np.sin(phi), np.cos(phi)
+    mat_rot = np.array([[c, -s], [s, c]])
+    rot_corners, affine_mat, bounding = adaptive_affine(img, mat_rot, content_corners)
+    affined = cv2.warpAffine(img, affine_mat, bounding)
+    return affined, affine_mat, rot_corners
+
+
+def tilt_image(img, tilt, content_corners=None):
+    if content_corners is None:
+        content_corners = default_corners(img)
+    if tilt == 1:
+        return img, np.concatenate([np.eye(2), np.zeros((2, 1))], axis=1), content_corners
+    gaussian_sigma = 0.8 * np.sqrt(tilt ** 2 - 1)
+    unti_aliasing = cv2.GaussianBlur(
+        img, (3, 1), sigmaX=0, sigmaY=gaussian_sigma)
+    mat_tilt = np.array([[1, 0], [0, 1 / tilt]])
+    tilt_corners, affine_mat, bounding = adaptive_affine(img, mat_tilt, content_corners)
+    affined = cv2.warpAffine(unti_aliasing, affine_mat, bounding)
+    return affined, affine_mat, tilt_corners
+
+
+def rand(a=0, b=1, size=None):
+    if size is not None:
+        return np.random.rand(*size) * (b - a) + a
+    else:
+        return np.random.rand() * (b - a) + a
+
+
+def sk_warpcrop(img, homo_mat, warpcrop_box):
+    warpped_img = transform.warp(img, homo_mat)
+    crop = warpped_img[warpcrop_box[1]:warpcrop_box[1] + warpcrop_box[3],
+           warpcrop_box[0]:warpcrop_box[0] + warpcrop_box[2], :].copy()
+    crop_h, crop_w = crop.shape[0], crop.shape[1]
+    if crop_h != warpcrop_box[3] or crop_w != warpcrop_box[2]:
+        print('Regenerate random patch !')
+        return None
+    crop = crop * 255
+    crop = crop.astype(np.uint8)
+    return crop
