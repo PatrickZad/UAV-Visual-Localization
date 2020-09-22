@@ -1,6 +1,7 @@
 /.vscode
 /.idea
 *.jpg
+*.png
 *.pyc
 *.pth
 *.tar

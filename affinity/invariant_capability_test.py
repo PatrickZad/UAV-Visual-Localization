@@ -10,6 +10,7 @@ from shapely.geometry import Polygon, MultiPoint
 import data.vhr_remote as vhr
 from torch.utils.data import DataLoader
 import logging
+from affinity.libs.utils import diff_crop
 
 
 def parse_args():
@@ -157,7 +158,7 @@ def save_vis(id, frame1, frame2, savedir, coords=None, gt_corners=None, bbox_b=N
             frame1_f_grid = np.concatenate([frame1_f_grid_x, frame1_f_grid_y], axis=-1)
             frame1_f_grid_flat = frame1_f_grid.reshape((-1, 2))
             dsamp_mask = np.zeros(frame1_f_grid_x.shape[:2]) != 0
-            dsamp_mask[::4, ::4] = True
+            dsamp_mask[::8, ::8] = True
             dsamp_mask_flat = dsamp_mask.reshape((-1,))
             frame1_f_coords = frame1_f_grid_flat[dsamp_mask_flat]
             estimate_coords = coord_img[dsamp_mask_flat]
@@ -171,14 +172,14 @@ def save_vis(id, frame1, frame2, savedir, coords=None, gt_corners=None, bbox_b=N
 
 def line_batch(bpt1, bpt2):
     bk = (bpt2[:, 1] - bpt1[:, 1]) / (bpt2[:, 0] - bpt1[:, 0])
-    return bk, bpt1[1] - bk * bpt1[0]
+    return bk, bpt1[:, 1] - bk * bpt1[:, 0]
 
 
 def cross_pt_batch(bline1, bline2):
     k1, b1 = bline1
     k2, b2 = bline2
     x = (b2 - b1) / (k1 - k2)
-    return x, x * k1 + b1
+    return x.unsqueeze(dim=1), (x * k1 + b1).unsqueeze(dim=1)
 
 
 def avg_px_dist_of_batch(bbox, corners_gt):
@@ -187,10 +188,11 @@ def avg_px_dist_of_batch(bbox, corners_gt):
     bbox_centers = torch.cat([bbox_lt, bbox_rb], dim=1).mean(1)
     bline1 = line_batch(corners_gt[:, 0, :], corners_gt[:, 2, :])
     bline2 = line_batch(corners_gt[:, 1, :], corners_gt[:, 3, :])
-    est_pts = cross_pt_batch(bline1, bline2)
+    x_b, y_b = cross_pt_batch(bline1, bline2)
+    est_pts = torch.cat([x_b, y_b], dim=-1)
     square = (est_pts - bbox_centers) ** 2
     dist_t = (torch.sum(square, dim=-1) ** 0.5).mean()
-    return dist_t.cpu().numpy()[0]
+    return dist_t.unsqueeze(dim=0).cpu().detach().numpy()[0]
 
 
 class AverageMeter(object):
@@ -254,7 +256,7 @@ def invariant_test_match(args):
         _, dataset, _ = vhr.getVHRRemoteDataAugCropper(aug=aug)
         dist_avg_meter = AverageMeter()
         iou_avg_meter = AverageMeter()
-        dataloader = DataLoader(dataset, batch_size=args.batch_size)
+        dataloader = DataLoader(dataset, batch_size=args.batchsize)
         expr_dir = os.path.join('./experiments/scale_vhr', str(scale_factor))
         if not os.path.exists(expr_dir):
             os.makedirs(expr_dir)
@@ -274,22 +276,84 @@ def invariant_test_match(args):
         for i, frames in enumerate(dataloader):
             frame1_var = frames[0].cuda()
             frame2_var = frames[1].cuda()
-            corners_gt = frames[-1]
+            corners_gt = frames[-1].cuda()
             p_size = args.patch_size // 8
             model.grid_flat = None
-            bbox, _, coords = model(frame1_var, frame2_var, warm_up=False, patch_size=(p_size, p_size),
-                                    test_result=True)
-            save_vis(i, frame1_var, frame2_var, expr_dir, coords, corners_gt, bbox)
-            dist = avg_px_dist_of_batch(bbox, corners_gt)
-            dist_avg_meter.update(dist, args.batch_size)
-            iou = avg_iou_of_batch(bbox, corners_gt)
-            iou_avg_meter.update(iou, args.batch_size)
-            logger.info(str(i) + '-dist-' + str(dist))
-            logger.info(str(i) + '-iou-' + str(iou))
+            esti_bbox, _, coords = model(frame1_var, frame2_var, warm_up=False, patch_size=(p_size, p_size),
+                                         test_result=True)
+
+            if frame1_var.size(2) > args.patch_size:
+                center = frame1_var.size(2) // 2
+                half_patch_size = args.patch_size // 2
+                bbox = torch.tensor(
+                    [center - half_patch_size, center - half_patch_size, center - half_patch_size + args.patch_size,
+                     center - half_patch_size + args.patch_size], dtype=torch.float).cuda()
+                bbox = bbox.repeat(args.batchsize, 1)
+                frame1_var = diff_crop(frame1_var, bbox[:, 0], bbox[:, 1], bbox[:, 2], bbox[:, 3],
+                                       args.patch_size, args.patch_size)
+
+            save_vis(i, frame1_var, frame2_var, expr_dir, coords, corners_gt, esti_bbox)
+            dist = avg_px_dist_of_batch(esti_bbox, corners_gt)
+            dist_avg_meter.update(dist, args.batchsize)
+            iou = avg_iou_of_batch(esti_bbox, corners_gt)
+            iou_avg_meter.update(iou, args.batchsize)
+            if i % 8 == 0:
+                logger.info(str(i) + '-dist-' + str(dist))
+                logger.info(str(i) + '-iou-' + str(iou))
         logger.info('scale ' + str(scale_factor) + ' avg_dist: ' + str(dist_avg_meter.avg))
         logger.info('scale ' + str(scale_factor) + ' avg_iou: ' + str(iou_avg_meter.avg))
     for aug in aug_rot:
-        pass
+        rot_deg = aug['rotate'][0]
+        _, dataset, _ = vhr.getVHRRemoteDataAugCropper(aug=aug)
+        dist_avg_meter = AverageMeter()
+        iou_avg_meter = AverageMeter()
+        dataloader = DataLoader(dataset, batch_size=args.batchsize)
+        expr_dir = os.path.join('./experiments/rot_vhr', str(rot_deg))
+        if not os.path.exists(expr_dir):
+            os.makedirs(expr_dir)
+
+        logger = logging.getLogger(__name__)
+        logger.setLevel(logging.DEBUG)
+        fh = logging.FileHandler(os.path.join(expr_dir, 'test.log'))
+        fh.setLevel(logging.DEBUG)
+        ch = logging.StreamHandler()
+        ch.setLevel(logging.DEBUG)
+        formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+        fh.setFormatter(formatter)
+        ch.setFormatter(formatter)
+        logger.addHandler(fh)
+        logger.addHandler(ch)
+
+        for i, frames in enumerate(dataloader):
+            frame1_var = frames[0].cuda()
+            frame2_var = frames[1].cuda()
+            corners_gt = frames[-1].cuda()
+            p_size = args.patch_size // 8
+            model.grid_flat = None
+            esti_bbox, _, coords = model(frame1_var, frame2_var, warm_up=False, patch_size=(p_size, p_size),
+                                         test_result=True)
+
+            if frame1_var.size(2) > args.patch_size:
+                center = frame1_var.size(2) // 2
+                half_patch_size = args.patch_size // 2
+                bbox = torch.tensor(
+                    [center - half_patch_size, center - half_patch_size, center - half_patch_size + args.patch_size,
+                     center - half_patch_size + args.patch_size], dtype=torch.float).cuda()
+                bbox = bbox.repeat(args.batchsize, 1)
+                frame1_var = diff_crop(frame1_var, bbox[:, 0], bbox[:, 1], bbox[:, 2], bbox[:, 3],
+                                       args.patch_size, args.patch_size)
+
+            save_vis(i, frame1_var, frame2_var, expr_dir, coords, corners_gt, esti_bbox)
+            dist = avg_px_dist_of_batch(esti_bbox, corners_gt)
+            dist_avg_meter.update(dist, args.batchsize)
+            iou = avg_iou_of_batch(esti_bbox, corners_gt)
+            iou_avg_meter.update(iou, args.batchsize)
+            if i % 8 == 0:
+                logger.info(str(i) + '-dist-' + str(dist))
+                logger.info(str(i) + '-iou-' + str(iou))
+        logger.info('rotate ' + str(rot_deg) + ' avg_dist: ' + str(dist_avg_meter.avg))
+        logger.info('rotate ' + str(rot_deg) + ' avg_iou: ' + str(iou_avg_meter.avg))
+
 
 if __name__ == '__main__':
     args = parse_args()

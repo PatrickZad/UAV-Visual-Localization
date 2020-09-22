@@ -93,8 +93,8 @@ class VHRRemoteDataReader:
 
     def _rand_crop(self, map_arr, crop_size=256):
         h, w = map_arr.shape[:2]
-        offset_x = np.random.randint(int(0.1 * w), int(w - crop_size - 0.1 * w))
-        offset_y = np.random.randint(int(0.1 * h), int(h - crop_size - 0.1 * h))
+        offset_x = np.random.randint(int(0.1 * w), int(0.9 * w - crop_size))
+        offset_y = np.random.randint(int(0.1 * h), int(0.9 * h - crop_size))
         crop = map_arr[offset_y:offset_y + crop_size, offset_x:offset_x + crop_size, :].copy()
         corners = np.array([(offset_x, offset_y), (offset_x + crop_size - 1, offset_y),
                             (offset_x + crop_size - 1, offset_y + crop_size - 1), (offset_x, offset_y + crop_size - 1)])
@@ -206,6 +206,9 @@ class VHRRemoteDataReader:
                 scale_factor = aug_options['scale'][0]
             else:
                 scale_factor = rand(aug_options['scale'][0], aug_options['scale'][1])
+            map_h, map_w = map_arr.shape[:2]
+            if scale_factor * map_h < 1.32 * crop_size or scale_factor * map_w < 1.32 * crop_size:
+                scale_factor = crop_size * 1.32 / min(map_h, map_w)
             scaled_img = cv.resize(map_arr, dsize=(0, 0), fx=scale_factor, fy=scale_factor)
             crop, crop_corners = self._rand_crop(scaled_img, crop_size)
             crop_corners = crop_corners / scale_factor
@@ -214,7 +217,7 @@ class VHRRemoteDataReader:
             crop, crop_corners = self._rand_crop(map_arr, crop_size)
         if 'rotate' in aug_options.keys():
             if len(aug_options['rotate']) == 1:
-                rot = aug_options['scale'][0]
+                rot = aug_options['rotate'][0]
             else:
                 rot = rand(aug_options['rotate'][0], aug_options['rotate'][1])
             if rot < 0:
@@ -367,7 +370,7 @@ class VHRRemoteWarm(VHRRemoteDataset):
 
 
 def getVHRRemoteDataAugCropper(dir='../Datasets/VHR Remote Sensing', crop_size=400, map_size=1424,
-                               proportion=(0.5, 0.5, 0.5), aug=aug_light, pertube=64):
+                               proportion=(0.3, 0.3, 0.3), aug=aug_light, pertube=64):
     # TODO rand val
     # warm,train,val
     dir_files = os.listdir(dir)
