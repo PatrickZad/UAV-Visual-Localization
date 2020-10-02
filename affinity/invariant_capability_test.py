@@ -30,11 +30,11 @@ def parse_args():
 
     # main parameters
     parser.add_argument("--pretrainRes", action="store_true")
-    parser.add_argument("--batchsize", type=int, default=1, help="batchsize")
+    parser.add_argument("--batchsize", type=int, default=2, help="batchsize")
     parser.add_argument('--workers', type=int, default=16)
 
-    parser.add_argument("--patch_size", type=int, default=384, help="crop size for localization.")
-    parser.add_argument("--full_size", type=int, default=1424, help="full size for one frame.")
+    parser.add_argument("--patch_size", type=int, default=256, help="crop size for localization.")
+    parser.add_argument("--full_size", type=int, default=1024, help="full size for one frame.")
     parser.add_argument("--window_len", type=int, default=2, help='number of images (2 for pair and 3 for triple)')
     parser.add_argument("--device", type=int, default=0,
                         help="0~device_count-1 for single GPU, device_count for dataparallel.")
@@ -249,29 +249,33 @@ def invariant_test_match(args):
     model.cuda()
     model.eval()
 
-    aug_scale = [{"scale": (i / 10,)} for i in range(5, 15)]
-    aug_rot = [{"rotate": (i * 10,)} for i in range(19)]
+    aug_scale = [{"scale": (i / 10,)} for i in range(2, 21)]
+    aug_rot = [{"rotate": (i * 10,)} for i in range(36)]
+
+    '''expr_base = './experiments/bbox-modeling/scale_vhr'
+    if not os.path.exists(expr_base):
+        os.makedirs(expr_base)
+    logger = logging.getLogger(__name__)
+    logger.setLevel(logging.DEBUG)
+    fh = logging.FileHandler(os.path.join(expr_base, 'test.log'))
+    fh.setLevel(logging.DEBUG)
+    ch = logging.StreamHandler()
+    ch.setLevel(logging.DEBUG)
+    formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+    fh.setFormatter(formatter)
+    ch.setFormatter(formatter)
+    logger.addHandler(fh)
+    logger.addHandler(ch)
+
     for aug in aug_scale:
         scale_factor = aug['scale'][0]
         _, dataset, _ = vhr.getVHRRemoteDataAugCropper(aug=aug)
         dist_avg_meter = AverageMeter()
         iou_avg_meter = AverageMeter()
         dataloader = DataLoader(dataset, batch_size=args.batchsize)
-        expr_dir = os.path.join('./experiments/scale_vhr', str(scale_factor))
+        expr_dir = os.path.join(expr_base, str(scale_factor))
         if not os.path.exists(expr_dir):
             os.makedirs(expr_dir)
-
-        logger = logging.getLogger(__name__)
-        logger.setLevel(logging.DEBUG)
-        fh = logging.FileHandler(os.path.join(expr_dir, 'test.log'))
-        fh.setLevel(logging.DEBUG)
-        ch = logging.StreamHandler()
-        ch.setLevel(logging.DEBUG)
-        formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
-        fh.setFormatter(formatter)
-        ch.setFormatter(formatter)
-        logger.addHandler(fh)
-        logger.addHandler(ch)
 
         for i, frames in enumerate(dataloader):
             frame1_var = frames[0].cuda()
@@ -292,6 +296,7 @@ def invariant_test_match(args):
                 frame1_var = diff_crop(frame1_var, bbox[:, 0], bbox[:, 1], bbox[:, 2], bbox[:, 3],
                                        args.patch_size, args.patch_size)
 
+
             save_vis(i, frame1_var, frame2_var, expr_dir, coords, corners_gt, esti_bbox)
             dist = avg_px_dist_of_batch(esti_bbox, corners_gt)
             dist_avg_meter.update(dist, args.batchsize)
@@ -301,28 +306,31 @@ def invariant_test_match(args):
                 logger.info(str(i) + '-dist-' + str(dist))
                 logger.info(str(i) + '-iou-' + str(iou))
         logger.info('scale ' + str(scale_factor) + ' avg_dist: ' + str(dist_avg_meter.avg))
-        logger.info('scale ' + str(scale_factor) + ' avg_iou: ' + str(iou_avg_meter.avg))
+        logger.info('scale ' + str(scale_factor) + ' avg_iou: ' + str(iou_avg_meter.avg))'''
+    expr_base = './experiments/bbox-modeling/rot_vhr'
+    if not os.path.exists(expr_base):
+        os.makedirs(expr_base)
+    logger = logging.getLogger(__name__)
+    logger.setLevel(logging.DEBUG)
+    fh = logging.FileHandler(os.path.join(expr_base, 'test.log'))
+    fh.setLevel(logging.DEBUG)
+    ch = logging.StreamHandler()
+    ch.setLevel(logging.DEBUG)
+    formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+    fh.setFormatter(formatter)
+    ch.setFormatter(formatter)
+    logger.addHandler(fh)
+    logger.addHandler(ch)
+
     for aug in aug_rot:
         rot_deg = aug['rotate'][0]
         _, dataset, _ = vhr.getVHRRemoteDataAugCropper(aug=aug)
         dist_avg_meter = AverageMeter()
         iou_avg_meter = AverageMeter()
         dataloader = DataLoader(dataset, batch_size=args.batchsize)
-        expr_dir = os.path.join('./experiments/rot_vhr', str(rot_deg))
+        expr_dir = os.path.join(expr_base, str(rot_deg))
         if not os.path.exists(expr_dir):
             os.makedirs(expr_dir)
-
-        logger = logging.getLogger(__name__)
-        logger.setLevel(logging.DEBUG)
-        fh = logging.FileHandler(os.path.join(expr_dir, 'test.log'))
-        fh.setLevel(logging.DEBUG)
-        ch = logging.StreamHandler()
-        ch.setLevel(logging.DEBUG)
-        formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
-        fh.setFormatter(formatter)
-        ch.setFormatter(formatter)
-        logger.addHandler(fh)
-        logger.addHandler(ch)
 
         for i, frames in enumerate(dataloader):
             frame1_var = frames[0].cuda()

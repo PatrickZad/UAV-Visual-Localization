@@ -369,7 +369,7 @@ class VHRRemoteWarm(VHRRemoteDataset):
         return ref_t, tar_t
 
 
-def getVHRRemoteDataAugCropper(dir='../Datasets/VHR Remote Sensing', crop_size=400, map_size=1424,
+def getVHRRemoteDataAugCropper(dir='../Datasets/VHR Remote Sensing', crop_size=288, map_size=1024,
                                proportion=(0.3, 0.3, 0.3), aug=aug_light, pertube=64):
     # TODO rand val
     # warm,train,val
